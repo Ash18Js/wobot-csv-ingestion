@@ -23,16 +23,24 @@ command -v jq >/dev/null || { echo "This script needs jq. Install it, or read th
 
 say() { printf '%s\n' "$*"; }
 
-# ---- authenticate -----------------------------------------------------------
-TOKEN=$(curl -sS -X POST "$API/v1/auth/register" -H 'content-type: application/json' \
-  -d "{\"accountType\":\"merchant\",\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"merchantName\":\"Benchmark Retail\"}" \
-  | jq -r '.accessToken // empty')
+TOKEN=""
 
-if [ -z "$TOKEN" ]; then
-  TOKEN=$(curl -sS -X POST "$API/v1/auth/login" -H 'content-type: application/json' \
-    -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" | jq -r '.accessToken')
-fi
-[ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || { echo "Could not authenticate against $API"; exit 1; }
+# A 2 GB ingest outlives the 15-minute access token, so the poll loop below
+# re-authenticates on 401 rather than falling over two thirds of the way in.
+# (Found the hard way.)
+authenticate() {
+  TOKEN=$(curl -sS -X POST "$API/v1/auth/register" -H 'content-type: application/json' \
+    -d "{\"accountType\":\"merchant\",\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"merchantName\":\"Benchmark Retail\"}" \
+    | jq -r '.accessToken // empty')
+
+  if [ -z "$TOKEN" ]; then
+    TOKEN=$(curl -sS -X POST "$API/v1/auth/login" -H 'content-type: application/json' \
+      -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" | jq -r '.accessToken // empty')
+  fi
+  [ -n "$TOKEN" ] || { echo "Could not authenticate against $API"; exit 1; }
+}
+
+authenticate
 
 SIZE_BYTES=$(wc -c < "$FILE")
 say ""
@@ -58,7 +66,13 @@ INGEST_START=$(date +%s.%N)
 
 while :; do
   BODY=$(curl -sS "$API/v1/imports/$ID" -H "authorization: Bearer $TOKEN")
-  STATUS=$(echo "$BODY" | jq -r '.status')
+  STATUS=$(echo "$BODY" | jq -r '.status // empty')
+
+  if [ -z "$STATUS" ]; then
+    authenticate
+    BODY=$(curl -sS "$API/v1/imports/$ID" -H "authorization: Bearer $TOKEN")
+    STATUS=$(echo "$BODY" | jq -r '.status // "unknown"')
+  fi
 
   MEM=$(docker stats --no-stream --format '{{.MemUsage}}' "$WORKER_CONTAINER" 2>/dev/null \
         | awk '{print $1}' | sed 's/MiB//;s/GiB/*1024/' | bc 2>/dev/null || true)

@@ -254,34 +254,46 @@ path.
 
 ## Measured performance
 
-Measured on the sandbox this was developed in — **2 vCPU Intel Xeon @ 2.80 GHz,
-Postgres 16 on the same two cores**, which is the pessimistic case: the parser
-and the database compete for CPU rather than running in parallel.
+Full numbers, methodology and hardware are in **[`BENCHMARK.md`](BENCHMARK.md)**.
+A 2.00 GiB file — 24,708,106 rows, CRLF + BOM, 5% malformed, 10% duplicate SKUs
+— run on two very different machines:
 
-| | 1,000,000 rows / 82 MB |
-| --- | --- |
-| Upload + SHA-256 + `202` | 0.7 s |
-| Ingest wall clock | 47.7 s |
-| Throughput | ~21,000 rows/sec, 1.7 MB/sec |
-| Peak worker RSS | 124 MB (limit 512 MB) |
-| Result | 857,725 applied · 92,230 superseded · 50,045 rejected |
+| | Windows 11 · i5-13450HX (Docker Desktop) | Linux · 2-vCPU Xeon (native) |
+| --- | --- | --- |
+| Upload + SHA-256 + `202` | 21.6 s | 13.2 s |
+| Ingest wall clock | 31.1 min | 19.8 min |
+| Throughput | 13,236 rows/sec | 20,768 rows/sec |
+| Peak worker memory | **160 MiB** / 512 MiB | **148 MB** / 512 MB |
+| Attempts | 1 | 1 |
 
-Stage isolation on the same box, to show where the time goes:
+Both produced **identical tallies** — 21,189,124 applied, 2,280,595 superseded,
+1,238,387 rejected, summing exactly to 24,708,106. The rejected count matches
+the generator's own count of malformed rows. The result did not depend on
+hardware, batch timing, or how the work happened to be scheduled.
+
+`docker stats` mid-ingest says what the constraint is: worker at **85% CPU and
+59 MiB of its 512 MiB cap**, Postgres at **88% CPU and 571 MiB of 7.6 GiB
+available**, with 12.3 MB read from disk across the whole run. Not memory, not
+read I/O — CPU, on both sides at once, which is also evidence the write
+pipelining works.
+
+Stage isolation, measured separately:
 
 | Stage | Rows/sec |
 | --- | --- |
 | CSV parse only | 134,500 |
 | parse + `info` (byte offsets for checkpointing) | ~120,000 |
 | parse + `info` + validation | 78,900 |
-| full pipeline including COPY + merge + commit | 21,000 |
+| full pipeline including COPY + merge + commit | 20,768 |
 
 Two decisions came out of that table. `raw: true` on the parser (keeping each
 line's original text) cost a further 15% **on every row** to serve the 2–5% that
 get rejected — dropped, and the rejection report re-serializes the parsed record
-instead. And write pipelining is worth little here because both stages share two
-cores; on a machine where they do not, it is close to free throughput.
+instead. And the parser ceiling (~79k rows/sec) sits well above the database
+side (~28k), so the merge is where to spend further effort, not the parse.
 
-> **2 GB run:** see `BENCHMARK.md`, produced by `./scripts/benchmark.sh`.
+Reproduce with `./scripts/benchmark.sh ./tmp/huge.csv`, or
+`.\scripts\benchmark.ps1 -File .\tmp\huge.csv` on Windows.
 
 ---
 
@@ -391,7 +403,7 @@ itself.
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `DATABASE_URL` | — | Required |
-| `JWT_SECRET` | — | Required, 32+ chars |
+| `JWT_SECRET` | — | Required, 32+ chars. The value in `docker-compose.yml` is a dev placeholder and says so; a real deployment supplies its own |
 | `PORT` / `HOST` | `3000` / `0.0.0.0` | |
 | `UPLOAD_DIR` | `./uploads` | Shared volume between API and workers |
 | `MAX_UPLOAD_BYTES` | `2147483648` | 2 GB |
