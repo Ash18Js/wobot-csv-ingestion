@@ -1,0 +1,115 @@
+name: wobot-csv-ingestion
+
+x-app-env: &app-env
+  DATABASE_URL: postgres://catalog:catalog@postgres:5432/catalog
+  JWT_SECRET: dev-only-secret-change-me-dev-only-secret-change-me
+  LOG_LEVEL: info
+  UPLOAD_DIR: /app/uploads
+  INGEST_BATCH_ROWS: "20000"
+  LEASE_SECONDS: "30"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: catalog
+      POSTGRES_PASSWORD: catalog
+      POSTGRES_DB: catalog
+    # Tuned a little for bulk COPY throughput; still fine on a laptop.
+    command:
+      - postgres
+      - -c
+      - max_connections=100
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - work_mem=32MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - synchronous_commit=off
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - max_wal_size=4GB
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U catalog -d catalog"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Runs once, applies migrations, exits 0. Everything else waits for it.
+  migrate:
+    build:
+      context: .
+    command: ["node", "dist/scripts/migrate.js"]
+    environment:
+      <<: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+    command: ["node", "dist/src/api.js"]
+    environment:
+      <<: *app-env
+      PORT: "3000"
+      HOST: 0.0.0.0
+    ports:
+      - "3000:3000"
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # The operating constraint from the brief: 512 MB, hard.
+    mem_limit: 512m
+    memswap_limit: 512m
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+    command: ["node", "dist/src/worker.js"]
+    environment:
+      <<: *app-env
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    mem_limit: 512m
+    memswap_limit: 512m
+    restart: unless-stopped
+    # Scale with:  docker compose up --scale worker=3
+    # Jobs are claimed with FOR UPDATE SKIP LOCKED, so workers never double-process.
+
+  # Not started by `docker compose up`. Run the suite with:
+  #     docker compose run --rm test
+  # It uses its own database, so it cannot disturb data you have ingested.
+  test:
+    build:
+      context: .
+      target: test
+    profiles: ["test"]
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgres://catalog:catalog@postgres:5432/catalog_test
+      UPLOAD_DIR: /tmp/uploads
+      INGEST_BATCH_ROWS: "500"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sh", "-c", "npx tsx scripts/migrate.ts && npx vitest run"]
+
+volumes:
+  pgdata:
+  uploads:
