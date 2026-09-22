@@ -7,7 +7,7 @@ x-app-env: &app-env
   UPLOAD_DIR: /app/uploads
   INGEST_BATCH_ROWS: "20000"
   LEASE_SECONDS: "30"
-
+  STAFF_REGISTRATION_CODE: WOBOT-STAFF-7F3K9Q2M
 services:
   postgres:
     image: postgres:16-alpine
