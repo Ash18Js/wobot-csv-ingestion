@@ -24,7 +24,7 @@ const schema = z.object({
    * self-served into existence — registering as staff requires this shared
    * code, which in a real deployment would be a one-time invite table.
    */
-  STAFF_REGISTRATION_CODE: z.string().min(8).optional(),
+  STAFF_REGISTRATION_CODE: z.string().min(8),
 
   UPLOAD_DIR: z.string().default('./uploads'),
 
@@ -50,7 +50,7 @@ const schema = z.object({
 });
 
 const parsed = schema.safeParse(process.env);
-
+console.log("process.env", process.env);
 if (!parsed.success) {
   const issues = parsed.error.issues
     .map((i) => `  ${i.path.join('.') || '(root)'}: ${i.message}`)
